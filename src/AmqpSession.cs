@@ -455,6 +455,8 @@ namespace Microsoft.Azure.Amqp
                     link.SafeClose(this.connection.TerminalException);
                 }
             }
+            this.incomingChannel.Dispose();
+            this.outgoingChannel.Dispose();
         }
 
         bool LinkFrameAllowed()
@@ -653,7 +655,7 @@ namespace Microsoft.Azure.Amqp
             AmqpTrace.Provider.AmqpRemoveLink(thisPtr, link, link.LocalHandle ?? 0u, link.RemoteHandle ?? 0u, link.Name);
         }
 
-        abstract class SessionChannel
+        abstract class SessionChannel : IDisposable
         {
             readonly AmqpSession session;
             readonly object syncRoot;
@@ -1051,6 +1053,23 @@ namespace Microsoft.Azure.Amqp
             {
                 public Delivery First;
                 public uint? Last;
+            }
+
+            protected virtual void Dispose(bool disposing)
+            {
+                if (disposing)
+                {
+                    if (dispositionTimer != null)
+                    {
+                        dispositionTimer.Dispose();
+                    }
+                }
+            }
+
+            public void Dispose()
+            {
+                Dispose(true);
+                GC.SuppressFinalize(this);
             }
         }
 
