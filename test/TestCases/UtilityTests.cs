@@ -24,7 +24,7 @@
 
             WaitCallback callContinue = null;
 
-            Func<object, bool> func = (o) =>
+            Func<object, bool> func = o =>
             {
                 bool workCompleted = callCount++ % 30000 != 0;
                 if (workCompleted)
@@ -51,24 +51,24 @@
                 }
             };
 
-            SerializedWorker<object> serialziedWorker = new SerializedWorker<object>(new Worker<object>(func));
-            callContinue = (o) => { serialziedWorker.ContinueWork(); };
+            SerializedWorker<object> serializedWorker = new SerializedWorker<object>(new Worker<object>(func));
+            callContinue = (o) => { serializedWorker.ContinueWork(); };
 
             Thread[] workerThreads = new Thread[workerCount];
             for (int i = 0; i < workerThreads.Length; ++i)
             {
                 workerThreads[i] = new Thread(producer);
-                workerThreads[i].Start(serialziedWorker);
+                workerThreads[i].Start(serializedWorker);
             }
 
             // issue some continue work signal
             for (int i = 0; i < 20000; ++i)
             {
-                serialziedWorker.ContinueWork();
+                serializedWorker.ContinueWork();
             }
 
             bool waitOne = completeEvent.WaitOne(60 * 1000);
-            Debug.WriteLine(string.Format("total: {0}, completed: {1}", totalCount, completedCount));
+            Debug.WriteLine($"total: {totalCount}, completed: {completedCount}");
             if (!waitOne)
             {
                 Assert.True(false, "Worker did not complete in time");
@@ -84,7 +84,7 @@
         {
             int callCount = 0;
 
-            Func<object, bool> func = (o) =>
+            Func<object, bool> func = o =>
             {
                 if (callCount == 0)
                 {
@@ -102,8 +102,8 @@
                 }
             };
 
-            SerializedWorker<object> serialziedWorker = new SerializedWorker<object>(new Worker<object>(func));
-            serialziedWorker.DoWork(serialziedWorker);
+            SerializedWorker<object> serializedWorker = new SerializedWorker<object>(new Worker<object>(func));
+            serializedWorker.DoWork(serializedWorker);
             Assert.True(callCount == 100, "the work is not done even if continue is called.");
         }
 

@@ -3,7 +3,7 @@
 
 namespace Microsoft.Azure.Amqp
 {
-    using System.Collections.Generic;
+    using System.Threading;
 
     /// <summary>
     /// Serializes concurrent work items and execute each work item
@@ -11,19 +11,16 @@ namespace Microsoft.Azure.Amqp
     /// </summary>
     public sealed class SerializedWorker<T> where T : class
     {
-        enum State
-        {
-            Idle,
-            Busy,
-            BusyWithContinue,
-            WaitingForContinue,
-            Aborted
-        }
-
         // the delegate should return true if work is completed
         readonly IWorkDelegate<T> workDelegate;
-        readonly LinkedList<T> pendingWorkList;
-        State state;
+        readonly ConcurrentPriorityCollection<T> pendingWorkList;
+        volatile int state;
+
+        private const int IdleState = 0;
+        private const int BusyState = 1;
+        private const int BusyWithContinueState = 2;
+        private const int WaitingForContinueState = 3;
+        private const int AbortedState = 4;
 
         /// <summary>
         /// Initializes the object.
@@ -32,25 +29,14 @@ namespace Microsoft.Azure.Amqp
         public SerializedWorker(IWorkDelegate<T> workProcessor)
         {
             this.workDelegate = workProcessor;
-            this.state = State.Idle;
-            this.pendingWorkList = new LinkedList<T>();
+            this.state = IdleState;
+            this.pendingWorkList = new ConcurrentPriorityCollection<T>();
         }
 
         /// <summary>
         /// Gets the count of the pending work items.
         /// </summary>
-        public int Count
-        {
-            get
-            {
-                return this.pendingWorkList.Count;
-            }
-        }
-
-        object SyncRoot
-        {
-            get { return this.pendingWorkList; }
-        }
+        public int Count => this.pendingWorkList.Count;
 
         /// <summary>
         /// Starts to do a work item. Depending on the worker state,
@@ -59,22 +45,19 @@ namespace Microsoft.Azure.Amqp
         /// <param name="work">The work item.</param>
         public void DoWork(T work)
         {
-            lock (this.SyncRoot)
+            if (this.state == AbortedState)
             {
-                if (this.state == State.Aborted)
-                {
-                    return;
-                }
-                else if (this.state != State.Idle)
-                {
-                    // Only do new work in idle state
-                    this.pendingWorkList.AddLast(work);
-                    return;
-                }
-
-                this.state = State.Busy;
+                return;
             }
 
+            if (this.state != IdleState)
+            {
+                // Only do new work in idle state
+                this.pendingWorkList.AddLast(work);
+                return;
+            }
+
+            Interlocked.Exchange(ref this.state, BusyState);
             this.DoWorkInternal(work, false);
         }
 
@@ -83,25 +66,20 @@ namespace Microsoft.Azure.Amqp
         /// </summary>
         public void ContinueWork()
         {
-            T work = null;
-            lock (this.SyncRoot)
+            if (this.state == BusyWithContinueState || this.state == AbortedState)
             {
-                if (this.state == State.BusyWithContinue || this.state == State.Aborted)
-                {
-                    return;
-                }
-                else if (this.state == State.Busy)
-                {
-                    this.state = State.BusyWithContinue;
-                    return;
-                }
+                return;
+            }
 
-                // Idle or WaitingForContinue, we should do the work
-                if (this.pendingWorkList.First != null)
-                {
-                    work = this.pendingWorkList.First.Value;
-                    this.state = State.Busy;
-                }
+            if (Interlocked.CompareExchange(ref state, BusyWithContinueState, BusyState) == BusyState)
+            {
+                return;
+            }
+
+            // Idle or WaitingForContinue, we should do the work
+            if (this.pendingWorkList.TryDequeue(out var work))
+            {
+                Interlocked.Exchange(ref this.state, BusyState);
             }
 
             if (work != null)
@@ -115,11 +93,8 @@ namespace Microsoft.Azure.Amqp
         /// </summary>
         public void Abort()
         {
-            lock (this.SyncRoot)
-            {
-                this.pendingWorkList.Clear();
-                this.state = State.Aborted;
-            }
+            this.pendingWorkList.Clear();
+            Interlocked.Exchange(ref this.state, AbortedState);
         }
 
         void DoWorkInternal(T work, bool fromList)
@@ -128,57 +103,44 @@ namespace Microsoft.Azure.Amqp
             {
                 if (this.workDelegate.Invoke(work))
                 {
-                    lock (this.SyncRoot)
+                    work = null;
+                    if (this.state != AbortedState)
                     {
-                        work = null;
-                        if (this.state != State.Aborted)
+                        if (this.pendingWorkList.TryDequeue(out work))
                         {
-                            if (fromList && this.pendingWorkList.First != null)
-                            {
-                                this.pendingWorkList.RemoveFirst();
-                            }
-
-                            if (this.pendingWorkList.First != null)
-                            {
-                                work = this.pendingWorkList.First.Value;
-                                fromList = true;
-                            }
-
-                            if (work == null)
-                            {
-                                // either there is no work or the worker was aborted
-                                this.state = State.Idle;
-                                return;
-                            }
-
-                            this.state = State.Busy;
+                            fromList = true;
                         }
+
+                        if (work == null)
+                        {
+                            // either there is no work or the worker was aborted
+                            Interlocked.Exchange(ref this.state, IdleState);
+                            return;
+                        }
+
+                        Interlocked.Exchange(ref this.state, BusyState);
                     }
                 }
                 else
                 {
-                    lock (this.SyncRoot)
+                    if (this.state == AbortedState)
                     {
-                        if (this.state == State.Aborted)
+                        work = null;
+                    }
+                    else if (Interlocked.CompareExchange(ref state, BusyState, BusyWithContinueState) == BusyWithContinueState)
+                    {
+                        // Continue called right after workFunc returned false
+                    }
+                    else
+                    {
+                        if (!fromList)
                         {
-                            work = null;
+                            // add to the head since later work may be queued already
+                            this.pendingWorkList.AddFirst(work);
                         }
-                        else if (this.state == State.BusyWithContinue)
-                        {
-                            // Continue called right after workFunc returned false
-                            this.state = State.Busy;
-                        }
-                        else
-                        {
-                            if (!fromList)
-                            {
-                                // add to the head since later work may be queued already
-                                this.pendingWorkList.AddFirst(work);
-                            }
 
-                            this.state = State.WaitingForContinue;
-                            work = null;
-                        }
+                        Interlocked.Exchange(ref this.state, WaitingForContinueState);
+                        work = null;
                     }
                 }
             }
