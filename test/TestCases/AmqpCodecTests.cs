@@ -1,4 +1,6 @@
-﻿namespace Test.Microsoft.Azure.Amqp
+﻿using System.Runtime.InteropServices;
+
+namespace Test.Microsoft.Azure.Amqp
 {
     using System;
     using System.Collections;
@@ -259,6 +261,19 @@
             EnsureEqual(dtValueBin, 0, dtValueBin.Length, buffer.Buffer, buffer.Offset, buffer.Length);
             DateTime? dtv = AmqpCodec.DecodeTimeStamp(new ByteBuffer(new ArraySegment<byte>(dtValueBin)));
             Assert.True(dtv == dtValue.ToUniversalTime(), "UByte value is not equal.");
+
+            // uuid test
+            var data = new Guid("00010203-0405-0607-0809-0a0b0c0d0e0f");
+            AmqpCodec.EncodeUuid(data, buffer = new ByteBuffer(workBuffer));
+
+            var readOnlySpan = buffer.Buffer.AsSpan().Slice(1, 16);
+            if (!BitConverter.IsLittleEndian ||
+                !MemoryMarshal.TryRead<Guid>(readOnlySpan, out var guid))
+            {
+                guid = new Guid(readOnlySpan.ToArray());
+            }
+
+            Guid? uuidv2 = AmqpCodec.DecodeUuid(buffer);
 
             // uuid
             AmqpCodec.EncodeUuid(uuidValue, buffer = new ByteBuffer(workBuffer));
